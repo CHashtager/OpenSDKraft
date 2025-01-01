@@ -1,0 +1,112 @@
+package {{ .PackageName }}_test
+
+import (
+    "context"
+    "encoding/json"
+    "net/http"
+    "net/http/httptest"
+    "testing"
+    "time"
+
+    "github.com/stretchr/testify/assert"
+    "github.com/stretchr/testify/require"
+    "{{ .Config.PackageName }}"
+)
+
+{{- range .TestData }}
+func Test{{ .Operation.Name }}(t *testing.T) {
+    {{- range .Expectations }}
+    t.Run("{{ .Name }}", func(t *testing.T) {
+        // Setup mock server
+        server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            // Verify request
+            assert.Equal(t, "{{ .Operation.Method }}", r.Method)
+            assert.Equal(t, "{{ .Operation.Path }}", r.URL.Path)
+
+            {{- if .ExpectedHeaders }}
+            // Verify headers
+            {{- range .ExpectedHeaders }}
+            assert.Equal(t, "{{ .Value }}", r.Header.Get("{{ .Key }}"))
+            {{- end }}
+            {{- end }}
+
+            {{- if .ExpectedQuery }}
+            // Verify query parameters
+            {{- range .ExpectedQuery }}
+            assert.Equal(t, "{{ .Value }}", r.URL.Query().Get("{{ .Key }}"))
+            {{- end }}
+            {{- end }}
+
+            {{- if .ExpectedBody }}
+            // Verify request body
+            var reqBody map[string]interface{}
+            err := json.NewDecoder(r.Body).Decode(&reqBody)
+            require.NoError(t, err)
+            {{- range .ExpectedBody }}
+            assert.Equal(t, {{ .Value }}, reqBody["{{ .Key }}"])
+            {{- end }}
+            {{- end }}
+
+            {{- if .ErrorCase }}
+            // Return error response
+            w.WriteHeader({{ .StatusCode }})
+            json.NewEncoder(w).Encode(map[string]interface{}{
+                "code": {{ .StatusCode }},
+                "message": "{{ .ErrorMessage }}"
+            })
+            {{- else }}
+            // Return success response
+            w.WriteHeader(http.StatusOK)
+            {{- if .MockResponse }}
+            json.NewEncoder(w).Encode({{ .MockResponse }})
+            {{- end }}
+            {{- end }}
+        }))
+        defer server.Close()
+
+        // Initialize client
+        client := {{ .PackageName }}.NewClient(server.URL)
+
+        {{- if .Operation.Authentication }}
+        client.SetAPIKey("test-api-key")
+        {{- end }}
+
+        // Execute test
+        {{- if .Operation.HasContext }}
+        ctx := context.Background()
+        {{- end }}
+
+        {{- if .MockRequest }}
+        req := {{ .MockRequest }}
+        {{- end }}
+
+        {{- if .Operation.ReturnsValue }}
+        result, err := client.{{ .Operation.Name }}(
+            {{- if .Operation.HasContext }}ctx,{{ end }}
+            {{- if .MockRequest }}req{{ end }}
+        )
+        {{- else }}
+        err := client.{{ .Operation.Name }}(
+            {{- if .Operation.HasContext }}ctx,{{ end }}
+            {{- if .MockRequest }}req{{ end }}
+        )
+        {{- end }}
+
+        {{- if .ErrorCase }}
+        require.Error(t, err)
+        apiErr, ok := err.(*{{ .PackageName }}.ErrorResponse)
+        require.True(t, ok)
+        assert.Equal(t, {{ .StatusCode }}, apiErr.Code)
+        assert.Equal(t, "{{ .ErrorMessage }}", apiErr.Message)
+        {{- else }}
+        require.NoError(t, err)
+        {{- if .Operation.ReturnsValue }}
+        {{- range .ExpectedResponse }}
+        assert.Equal(t, {{ .Value }}, result.{{ .Field }})
+        {{- end }}
+        {{- end }}
+        {{- end }}
+    })
+    {{- end }}
+}
+{{- end }}

@@ -1,0 +1,48 @@
+package {{ .PackageName }}
+
+{{- if .Imports }}
+import (
+    {{- range .Imports }}
+    "{{ . }}"
+    {{- end }}
+)
+{{- end }}
+
+{{ if .Description }}
+// {{ .Name }} {{ .Description }}
+{{- end }}
+type {{ .Name }} struct {
+    {{- range .Properties }}
+    {{- if .Description }}
+    // {{ .Description }}
+    {{- end }}
+    {{ .Name }} {{ .Type }} ` + "`" + `json:"{{ .JSONName }}{{if not .Required}},omitempty{{end}}"` + "`" + `
+    {{- end }}
+}
+
+{{- if .Config.Generator.IncludeValidation }}
+
+// Validate checks if the model satisfies all the requirements
+func (m *{{ .Name }}) Validate() error {
+    {{- range .Properties }}
+    {{- if .Required }}
+    if m.{{ .Name }} == "" {
+        return fmt.Errorf("{{ .JSONName }} is required")
+    }
+    {{- end }}
+    {{- end }}
+    return nil
+}
+{{- end }}
+
+{{- if .Config.Generator.IncludeExamples }}
+
+// Example{{ .Name }} returns an example instance of {{ .Name }}
+func Example{{ .Name }}() *{{ .Name }} {
+    return &{{ .Name }}{
+        {{- range .Properties }}
+        {{ .Name }}: {{ .ExampleValue }},
+        {{- end }}
+    }
+}
+{{- end }}

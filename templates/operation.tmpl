@@ -1,0 +1,70 @@
+package {{ .PackageName }}
+
+{{- if .Operation.Description }}
+// {{ .Operation.Name }} {{ .Operation.Description }}
+{{- end }}
+func (c *Client) {{ .Operation.Name }}(
+    {{- if .Config.Generator.ClientOptions.UseContext }}ctx context.Context,{{ end }}
+    {{- range .Operation.Parameters }}
+    {{ .Name }} {{ .Type }},
+    {{- end }}
+    {{- if .Operation.RequestBody }}
+    request {{ .Operation.RequestBody.Type }},
+    {{- end }}
+) ({{ .Operation.ResponseType }}, error) {
+    {{- if .Config.Generator.ClientOptions.UseContext }}
+    if ctx == nil {
+        ctx = context.Background()
+    }
+    {{- end }}
+
+    path := fmt.Sprintf("{{ .Operation.Path }}"
+    {{- range .Operation.Parameters }}
+    {{- if eq .Location "path" }}, {{ .Name }}{{ end }}
+    {{- end }})
+
+    {{- if .Operation.HasQueryParams }}
+    query := url.Values{}
+    {{- range .Operation.Parameters }}
+    {{- if eq .Location "query" }}
+    {{- if .Required }}
+    query.Set("{{ .JSONName }}", fmt.Sprint({{ .Name }}))
+    {{- else }}
+    if {{ .Name }} != nil {
+        query.Set("{{ .JSONName }}", fmt.Sprint(*{{ .Name }}))
+    }
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    if len(query) > 0 {
+        path += "?" + query.Encode()
+    }
+    {{- end }}
+
+    req, err := c.newRequest(ctx, "{{ .Operation.Method }}", path
+    {{- if .Operation.RequestBody }}, request{{ else }}, nil{{ end }})
+    if err != nil {
+        return {{ .Operation.ZeroValue }}, err
+    }
+
+    {{- range .Operation.Parameters }}
+    {{- if eq .Location "header" }}
+    {{- if .Required }}
+    req.Header.Set("{{ .JSONName }}", fmt.Sprint({{ .Name }}))
+    {{- else }}
+    if {{ .Name }} != nil {
+        req.Header.Set("{{ .JSONName }}", fmt.Sprint(*{{ .Name }}))
+    }
+    {{- end }}
+    {{- end }}
+    {{- end }}
+
+    {{- if .Operation.ResponseType }}
+    var response {{ .Operation.ResponseType }}
+    err = c.do(req, &response)
+    return response, err
+    {{- else }}
+    err = c.do(req, nil)
+    return err
+    {{- end }}
+}

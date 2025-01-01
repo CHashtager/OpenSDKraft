@@ -1,0 +1,13 @@
+sdkName: MyAPIClient
+outputDir: ./generated
+packageName: myapi
+codeStyle:
+  usePointers: true
+  indentStyle: space
+  maxLineLength: 120
+  generateComments: true
+testing:
+  generate: true
+  framework: testify
+  generateMocks: true
+  includeBenchmarks: true

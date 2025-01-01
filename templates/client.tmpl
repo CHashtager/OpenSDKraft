@@ -1,0 +1,145 @@
+package {{ .PackageName }}
+
+import (
+    "context"
+    "encoding/json"
+    "fmt"
+    "net/http"
+    "net/url"
+    "time"
+)
+
+// ClientOption is a function that modifies the client
+type ClientOption func(*Client)
+
+// Client represents the API client
+type Client struct {
+    httpClient  *http.Client
+    baseURL     string
+    apiKey      string
+    retryConfig *RetryConfig
+    {{- if .Config.Generator.ClientOptions.UseContext }}
+    ctx         context.Context
+    {{- end }}
+}
+
+type RetryConfig struct {
+    MaxRetries      int
+    RetryDelay      time.Duration
+    MaxRetryDelay   time.Duration
+    BackoffFactor   float64
+}
+
+// NewClient creates a new API client
+func NewClient(baseURL string, opts ...ClientOption) *Client {
+    c := &Client{
+        httpClient: &http.Client{
+            Timeout: time.Second * time.Duration({{ .Config.Generator.ClientOptions.Timeout }}),
+        },
+        baseURL: baseURL,
+        retryConfig: &RetryConfig{
+            MaxRetries:    {{ .Config.Generator.ClientOptions.MaxRetries }},
+            RetryDelay:    time.Second,
+            MaxRetryDelay: time.Second * 30,
+            BackoffFactor: 2.0,
+        },
+    }
+
+    for _, opt := range opts {
+        opt(c)
+    }
+
+    return c
+}
+
+// WithHTTPClient sets a custom HTTP client
+func WithHTTPClient(client *http.Client) ClientOption {
+    return func(c *Client) {
+        c.httpClient = client
+    }
+}
+
+// WithAPIKey sets the API key for authentication
+func WithAPIKey(apiKey string) ClientOption {
+    return func(c *Client) {
+        c.apiKey = apiKey
+    }
+}
+
+{{- if .Config.Generator.ClientOptions.UseContext }}
+// WithContext sets a context for all requests
+func WithContext(ctx context.Context) ClientOption {
+    return func(c *Client) {
+        c.ctx = ctx
+    }
+}
+{{- end }}
+
+// WithRetryConfig sets the retry configuration
+func WithRetryConfig(config *RetryConfig) ClientOption {
+    return func(c *Client) {
+        c.retryConfig = config
+    }
+}
+
+func (c *Client) newRequest(ctx context.Context, method, path string, body interface{}) (*http.Request, error) {
+    u, err := url.JoinPath(c.baseURL, path)
+    if err != nil {
+        return nil, err
+    }
+
+    var buf []byte
+    if body != nil {
+        buf, err = json.Marshal(body)
+        if err != nil {
+            return nil, err
+        }
+    }
+
+    req, err := http.NewRequestWithContext(ctx, method, u, bytes.NewBuffer(buf))
+    if err != nil {
+        return nil, err
+    }
+
+    if c.apiKey != "" {
+        req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
+    }
+    req.Header.Set("Content-Type", "application/json")
+    req.Header.Set("Accept", "application/json")
+
+    return req, nil
+}
+
+func (c *Client) do(req *http.Request, v interface{}) error {
+    resp, err := c.httpClient.Do(req)
+    if err != nil {
+        return err
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusBadRequest {
+        var errResp ErrorResponse
+        if err = json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+            return &errResp
+        }
+        return fmt.Errorf("unknown error, status code: %d", resp.StatusCode)
+    }
+
+    if v != nil {
+        if err = json.NewDecoder(resp.Body).Decode(v); err != nil {
+            return err
+        }
+    }
+
+    return nil
+}
+
+// ErrorResponse represents an error response from the API
+type ErrorResponse struct {
+    Code    int    `json:"code"`
+    Message string `json:"message"`
+}
+
+func (e *ErrorResponse) Error() string {
+    return fmt.Sprintf("API error %d: %s", e.Code, e.Message)
+}
