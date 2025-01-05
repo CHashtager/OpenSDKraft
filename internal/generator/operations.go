@@ -420,7 +420,7 @@ func (g *OperationGenerator) generateOperationFile(operation *Operation, outputD
 		return err
 	}
 
-	filename := filepath.Join(outputDir, "operations", strings.ToLower(operation.Name)+".go")
+	filename := filepath.Join(outputDir, strings.ToLower(operation.Name)+".go")
 	return utils.WriteFile(filename, content)
 }
 
