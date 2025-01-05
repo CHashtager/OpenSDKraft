@@ -1,0 +1,158 @@
+package {{ .PackageName }}_test
+
+import (
+    "encoding/json"
+    "testing"
+
+    "github.com/stretchr/testify/assert"
+    "github.com/stretchr/testify/require"
+
+    {{ .PackageName }} "{{ .Config.Module }}"
+)
+
+func Test{{ .Name }}_JSON(t *testing.T) {
+    tests := []struct {
+        name      string
+        model     *{{ .PackageName }}.{{ .Name }}
+        jsonData  string
+        wantErr   bool
+        checkJSON func(*testing.T, string)
+    }{
+        {
+            name: "marshal/unmarshal complete model",
+            model: &{{ .PackageName }}.{{ .Name }}{
+                {{- range .Properties }}
+                {{ .Name }}: {{ .ExampleValue }},
+                {{- end }}
+            },
+            checkJSON: func(t *testing.T, jsonStr string) {
+                {{- range .Properties }}
+                assert.Contains(t, jsonStr, `"{{ .JSONName }}"`)
+                {{- end }}
+            },
+        },
+        {
+            name: "unmarshal valid JSON",
+            jsonData: `{
+                {{- range .Properties }}
+                "{{ .JSONName }}": {{ .ExampleJSONValue }}{{ if not .IsLast }},{{ end }}
+                {{- end }}
+            }`,
+            checkJSON: func(t *testing.T, jsonStr string) {
+                var model {{ .PackageName }}.{{ .Name }}
+                err := json.Unmarshal([]byte(jsonStr), &model)
+                require.NoError(t, err)
+                {{- range .Properties }}
+                assert.Equal(t, {{ .ExampleValue }}, model.{{ .Name }})
+                {{- end }}
+            },
+        },
+        {
+            name: "omit empty values",
+            model: &{{ .PackageName }}.{{ .Name }}{
+                {{- range .Properties }}
+                {{- if .Required }}
+                {{ .Name }}: {{ .ExampleValue }},
+                {{- end }}
+                {{- end }}
+            },
+            checkJSON: func(t *testing.T, jsonStr string) {
+                {{- range .Properties }}
+                {{- if not .Required }}
+                assert.NotContains(t, jsonStr, `"{{ .JSONName }}"`)
+                {{- end }}
+                {{- end }}
+            },
+        },
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            if tt.model != nil {
+                // Test marshaling
+                data, err := json.Marshal(tt.model)
+                require.NoError(t, err)
+                if tt.checkJSON != nil {
+                    tt.checkJSON(t, string(data))
+                }
+            }
+
+            if tt.jsonData != "" {
+                // Test unmarshaling
+                var model {{ .PackageName }}.{{ .Name }}
+                err := json.Unmarshal([]byte(tt.jsonData), &model)
+                if tt.wantErr {
+                    require.Error(t, err)
+                    return
+                }
+                require.NoError(t, err)
+            }
+        })
+    }
+}
+
+{{- if .Config.Generator.IncludeValidation }}
+func Test{{ .Name }}_Validate(t *testing.T) {
+    tests := []struct {
+        name      string
+        model     *{{ .PackageName }}.{{ .Name }}
+        wantErr   bool
+        errField  string
+    }{
+        {
+            name: "valid model",
+            model: &{{ .PackageName }}.{{ .Name }}{
+                {{- range .Properties }}
+                {{- if .Required }}
+                {{ .Name }}: {{ .ExampleValue }},
+                {{- end }}
+                {{- end }}
+            },
+            wantErr: false,
+        },
+        {{- range .Properties }}
+        {{- if .Required }}
+        {
+            name: "missing required {{ .Name }}",
+            model: &{{ $.PackageName }}.{{ $.Name }}{
+                {{- range $.Properties }}
+                {{- if and .Required (ne .Name $.Name) }}
+                {{ .Name }}: {{ .ExampleValue }},
+                {{- end }}
+                {{- end }}
+            },
+            wantErr: true,
+            errField: "{{ .JSONName }}",
+        },
+        {{- end }}
+        {{- end }}
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            err := tt.model.Validate()
+            if tt.wantErr {
+                require.Error(t, err)
+                if tt.errField != "" {
+                    assert.Contains(t, err.Error(), tt.errField)
+                }
+                return
+            }
+            require.NoError(t, err)
+        })
+    }
+}
+{{- end }}
+
+{{- if .Config.Generator.IncludeExamples }}
+func TestExample{{ .Name }}(t *testing.T) {
+    example := {{ .PackageName }}.Example{{ .Name }}()
+    require.NotNil(t, example)
+
+    {{- if .Config.Generator.IncludeValidation }}
+    // Validate example
+    err := example.Validate()
+    require.NoError(t, err)
+    {{- end }}
+}
+{{- end }}

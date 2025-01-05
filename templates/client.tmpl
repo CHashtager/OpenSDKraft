@@ -1,48 +1,56 @@
 package {{ .PackageName }}
 
 import (
+    "bytes"
     "context"
     "encoding/json"
     "fmt"
+    "io"
     "net/http"
     "net/url"
     "time"
 )
 
-// ClientOption is a function that modifies the client
+// ClientOption allows customizing the API client
 type ClientOption func(*Client)
 
 // Client represents the API client
 type Client struct {
-    httpClient  *http.Client
     baseURL     string
+    httpClient  *http.Client
+    {{- if .Config.Generator.ClientOptions.UseAuth }}
     apiKey      string
+    {{- end }}
+    {{- if .Config.Generator.ClientOptions.RetryEnabled }}
     retryConfig *RetryConfig
-    {{- if .Config.Generator.ClientOptions.UseContext }}
-    ctx         context.Context
     {{- end }}
 }
 
+{{- if .Config.Generator.ClientOptions.RetryEnabled }}
+// RetryConfig holds the retry settings
 type RetryConfig struct {
-    MaxRetries      int
-    RetryDelay      time.Duration
-    MaxRetryDelay   time.Duration
-    BackoffFactor   float64
+    MaxRetries    int
+    RetryDelay    time.Duration
+    MaxRetryDelay time.Duration
+    BackoffFactor float64
 }
+{{- end }}
 
 // NewClient creates a new API client
 func NewClient(baseURL string, opts ...ClientOption) *Client {
     c := &Client{
+        baseURL: baseURL,
         httpClient: &http.Client{
             Timeout: time.Second * time.Duration({{ .Config.Generator.ClientOptions.Timeout }}),
         },
-        baseURL: baseURL,
+        {{- if .Config.Generator.ClientOptions.RetryEnabled }}
         retryConfig: &RetryConfig{
             MaxRetries:    {{ .Config.Generator.ClientOptions.MaxRetries }},
             RetryDelay:    time.Second,
             MaxRetryDelay: time.Second * 30,
             BackoffFactor: 2.0,
         },
+        {{- end }}
     }
 
     for _, opt := range opts {
@@ -59,87 +67,145 @@ func WithHTTPClient(client *http.Client) ClientOption {
     }
 }
 
+{{- if .Config.Generator.ClientOptions.UseAuth }}
 // WithAPIKey sets the API key for authentication
 func WithAPIKey(apiKey string) ClientOption {
     return func(c *Client) {
         c.apiKey = apiKey
     }
 }
-
-{{- if .Config.Generator.ClientOptions.UseContext }}
-// WithContext sets a context for all requests
-func WithContext(ctx context.Context) ClientOption {
-    return func(c *Client) {
-        c.ctx = ctx
-    }
-}
 {{- end }}
 
+{{- if .Config.Generator.ClientOptions.RetryEnabled }}
 // WithRetryConfig sets the retry configuration
 func WithRetryConfig(config *RetryConfig) ClientOption {
     return func(c *Client) {
         c.retryConfig = config
     }
 }
+{{- end }}
 
 func (c *Client) newRequest(ctx context.Context, method, path string, body interface{}) (*http.Request, error) {
     u, err := url.JoinPath(c.baseURL, path)
     if err != nil {
-        return nil, err
+        return nil, fmt.Errorf("failed to join URL: %w", err)
     }
 
-    var buf []byte
+    var buf io.Reader
     if body != nil {
-        buf, err = json.Marshal(body)
+        jsonBody, err := json.Marshal(body)
         if err != nil {
-            return nil, err
+            return nil, fmt.Errorf("failed to marshal request body: %w", err)
         }
+        buf = bytes.NewBuffer(jsonBody)
     }
 
-    req, err := http.NewRequestWithContext(ctx, method, u, bytes.NewBuffer(buf))
+    req, err := http.NewRequestWithContext(ctx, method, u, buf)
     if err != nil {
-        return nil, err
+        return nil, fmt.Errorf("failed to create request: %w", err)
     }
 
+    req.Header.Set("Content-Type", "application/json")
+    req.Header.Set("Accept", "application/json")
+    {{- if .Config.Generator.ClientOptions.UseAuth }}
     if c.apiKey != "" {
         req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
     }
-    req.Header.Set("Content-Type", "application/json")
-    req.Header.Set("Accept", "application/json")
+    {{- end }}
 
     return req, nil
 }
 
 func (c *Client) do(req *http.Request, v interface{}) error {
+    {{- if .Config.Generator.ClientOptions.RetryEnabled }}
+    var lastErr error
+    for attempt := 0; attempt <= c.retryConfig.MaxRetries; attempt++ {
+        if attempt > 0 {
+            delay := c.calculateRetryDelay(attempt)
+            select {
+            case <-req.Context().Done():
+                return req.Context().Err()
+            case <-time.After(delay):
+            }
+        }
+
+        if err := c.doRequest(req, v); err != nil {
+            lastErr = err
+            if !c.shouldRetry(err) {
+                return err
+            }
+            continue
+        }
+        return nil
+    }
+    return fmt.Errorf("request failed after %d retries: %w", c.retryConfig.MaxRetries, lastErr)
+    {{- else }}
+    return c.doRequest(req, v)
+    {{- end }}
+}
+
+func (c *Client) doRequest(req *http.Request, v interface{}) error {
     resp, err := c.httpClient.Do(req)
     if err != nil {
-        return err
+        return fmt.Errorf("request failed: %w", err)
     }
     defer resp.Body.Close()
 
-    if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusBadRequest {
-        var errResp ErrorResponse
-        if err = json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
-            return &errResp
-        }
-        return fmt.Errorf("unknown error, status code: %d", resp.StatusCode)
+    if resp.StatusCode >= 400 {
+        return c.handleErrorResponse(resp)
     }
 
     if v != nil {
-        if err = json.NewDecoder(resp.Body).Decode(v); err != nil {
-            return err
+        if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
+            return fmt.Errorf("failed to decode response: %w", err)
         }
     }
 
     return nil
 }
 
-// ErrorResponse represents an error response from the API
-type ErrorResponse struct {
-    Code    int    `json:"code"`
-    Message string `json:"message"`
+{{- if .Config.Generator.ClientOptions.RetryEnabled }}
+func (c *Client) shouldRetry(err error) bool {
+    // Add retry logic based on error type or response status
+    return true // Customize based on your needs
 }
 
-func (e *ErrorResponse) Error() string {
-    return fmt.Sprintf("API error %d: %s", e.Code, e.Message)
+func (c *Client) calculateRetryDelay(attempt int) time.Duration {
+    delay := c.retryConfig.RetryDelay * time.Duration(1<<uint(attempt))
+    if delay > c.retryConfig.MaxRetryDelay {
+        delay = c.retryConfig.MaxRetryDelay
+    }
+    return delay
+}
+{{- end }}
+
+func (c *Client) handleErrorResponse(resp *http.Response) error {
+    var errResp struct {
+        Code    string `json:"code"`
+        Message string `json:"message"`
+    }
+
+    if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+        return fmt.Errorf("HTTP %d: unable to decode error response", resp.StatusCode)
+    }
+
+    return &APIError{
+        StatusCode: resp.StatusCode,
+        Code:      errResp.Code,
+        Message:   errResp.Message,
+    }
+}
+
+// APIError represents an API error response
+type APIError struct {
+    StatusCode int
+    Code      string
+    Message   string
+}
+
+func (e *APIError) Error() string {
+    if e.Code != "" {
+        return fmt.Sprintf("HTTP %d: %s - %s", e.StatusCode, e.Code, e.Message)
+    }
+    return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Message)
 }

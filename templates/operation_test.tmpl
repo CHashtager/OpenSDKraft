@@ -1,0 +1,152 @@
+package {{ .PackageName }}_test
+
+import (
+    "context"
+    "encoding/json"
+    "net/http"
+    "net/http/httptest"
+    "testing"
+
+    "github.com/stretchr/testify/assert"
+    "github.com/stretchr/testify/require"
+
+    {{ .PackageName }} "{{ .Config.Module }}"
+)
+
+func Test{{ .Operation.Name }}(t *testing.T) {
+    tests := []struct {
+        name        string
+        params      *{{ .PackageName }}.{{ .Operation.Name }}Params
+        {{- if .Operation.RequestBody }}
+        request     *{{ .PackageName }}.{{ .Operation.Name }}Request
+        {{- end }}
+        setup       func(*httptest.Server)
+        checkRequest func(*testing.T, *http.Request)
+        wantErr     bool
+        errMessage  string
+        {{- if .Operation.ResponseType }}
+        checkResponse func(*testing.T, *{{ .PackageName }}.{{ .Operation.Name }}Response)
+        {{- end }}
+    }{
+        {
+            name: "successful request",
+            {{- if .Operation.Parameters }}
+            params: &{{ .PackageName }}.{{ .Operation.Name }}Params{
+                {{- range .Operation.Parameters }}
+                {{- if .Required }}
+                {{ .Name }}: {{ .ExampleValue }},
+                {{- end }}
+                {{- end }}
+            },
+            {{- end }}
+            {{- if .Operation.RequestBody }}
+            request: &{{ .PackageName }}.{{ .Operation.Name }}Request{
+                Body: {{ .Operation.RequestBody.ExampleValue }},
+            },
+            {{- end }}
+            checkRequest: func(t *testing.T, r *http.Request) {
+                assert.Equal(t, "{{ .Operation.Method }}", r.Method)
+                {{- range .Operation.Parameters }}
+                {{- if eq .Location "header" }}
+                assert.Equal(t, "{{ .ExampleValue }}", r.Header.Get("{{ .JSONName }}"))
+                {{- end }}
+                {{- end }}
+            },
+            {{- if .Operation.ResponseType }}
+            checkResponse: func(t *testing.T, resp *{{ .PackageName }}.{{ .Operation.Name }}Response) {
+                require.NotNil(t, resp)
+            },
+            {{- end }}
+        },
+        {
+            name: "server error",
+            {{- if .Operation.Parameters }}
+            params: &{{ .PackageName }}.{{ .Operation.Name }}Params{
+                {{- range .Operation.Parameters }}
+                {{- if .Required }}
+                {{ .Name }}: {{ .ExampleValue }},
+                {{- end }}
+                {{- end }}
+            },
+            {{- end }}
+            setup: func(s *httptest.Server) {
+                s.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+                    w.WriteHeader(http.StatusInternalServerError)
+                    json.NewEncoder(w).Encode(map[string]string{
+                        "code": "SERVER_ERROR",
+                        "message": "internal server error",
+                    })
+                })
+            },
+            wantErr: true,
+            errMessage: "internal server error",
+        },
+        {{- range .Operation.Parameters }}
+        {{- if .Required }}
+        {{- $currentParam := . }}
+        {
+            name: "missing required {{ .Name }}",
+            params: &{{ $.PackageName }}.{{ $.Operation.Name }}Params{
+                {{- range $.Operation.Parameters }}
+                {{- if and .Required (ne .Name $currentParam.Name) }}
+                {{ .Name }}: {{ .ExampleValue }},
+                {{- end }}
+                {{- end }}
+            },
+            wantErr: true,
+            errMessage: "{{ .JSONName }} is required",
+        },
+        {{- end }}
+        {{- end }}
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+                if tt.checkRequest != nil {
+                    tt.checkRequest(t, r)
+                }
+
+                {{- if .Operation.ResponseType }}
+                // Send mock response
+                w.Header().Set("Content-Type", "application/json")
+                w.WriteHeader(http.StatusOK)
+                json.NewEncoder(w).Encode(map[string]interface{}{
+                    // Add mock response data based on your API
+                })
+                {{- else }}
+                w.WriteHeader(http.StatusOK)
+                {{- end }}
+            }))
+            defer server.Close()
+
+            if tt.setup != nil {
+                tt.setup(server)
+            }
+
+            client := {{ .PackageName }}.NewClient(server.URL)
+            {{- if .Operation.ResponseType }}
+            resp, err := client.{{ .Operation.Name }}(context.Background(), tt.params
+                {{- if .Operation.RequestBody }}, tt.request{{- end }})
+            {{- else }}
+            err := client.{{ .Operation.Name }}(context.Background(), tt.params
+                {{- if .Operation.RequestBody }}, tt.request{{- end }})
+            {{- end }}
+
+            if tt.wantErr {
+                require.Error(t, err)
+                if tt.errMessage != "" {
+                    assert.Contains(t, err.Error(), tt.errMessage)
+                }
+                return
+            }
+
+            require.NoError(t, err)
+            {{- if .Operation.ResponseType }}
+            if tt.checkResponse != nil {
+                tt.checkResponse(t, resp)
+            }
+            {{- end }}
+        })
+    }
+}

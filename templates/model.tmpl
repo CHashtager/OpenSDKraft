@@ -8,7 +8,7 @@ import (
 )
 {{- end }}
 
-{{ if .Description }}
+{{- if .Description }}
 // {{ .Name }} {{ .Description }}
 {{- end }}
 type {{ .Name }} struct {
@@ -16,19 +16,26 @@ type {{ .Name }} struct {
     {{- if .Description }}
     // {{ .Description }}
     {{- end }}
-    {{ .Name }} {{ .Type }} ` + "`" + `json:"{{ .JSONName }}{{if not .Required}},omitempty{{end}}"` + "`" + `
+    {{ .Name }} {{ .Type }} `json:"{{ .JSONName }}{{if not .Required}},omitempty{{end}}"{{if .Validate}} validate:"{{ .Validate }}"{{end}}`
     {{- end }}
 }
 
 {{- if .Config.Generator.IncludeValidation }}
 
-// Validate checks if the model satisfies all the requirements
+// Validate checks if the {{ .Name }} satisfies all constraints
 func (m *{{ .Name }}) Validate() error {
     {{- range .Properties }}
     {{- if .Required }}
-    if m.{{ .Name }} == "" {
+    if m.{{ .Name }} == {{ .ZeroValue }} {
         return fmt.Errorf("{{ .JSONName }} is required")
     }
+    {{- end }}
+    {{- if .Validation }}
+    {{- range .Validation }}
+    if err := {{ . }}; err != nil {
+        return fmt.Errorf("{{ $.Name }}.{{ .JSONName }}: %w", err)
+    }
+    {{- end }}
     {{- end }}
     {{- end }}
     return nil
@@ -44,5 +51,69 @@ func Example{{ .Name }}() *{{ .Name }} {
         {{ .Name }}: {{ .ExampleValue }},
         {{- end }}
     }
+}
+{{- end }}
+
+{{- if .Config.Generator.GenerateInterfaces }}
+
+// {{ .Name }}Interface defines the interface for {{ .Name }}
+type {{ .Name }}Interface interface {
+    {{- if .Config.Generator.IncludeValidation }}
+    Validate() error
+    {{- end }}
+    // Add any additional interface methods here
+}
+
+// Ensure {{ .Name }} implements {{ .Name }}Interface
+var _ {{ .Name }}Interface = (*{{ .Name }})(nil)
+{{- end }}
+
+{{- if .Config.Generator.IncludeJSON }}
+
+// MarshalJSON implements json.Marshaler
+func (m *{{ .Name }}) MarshalJSON() ([]byte, error) {
+    type Alias {{ .Name }}
+    return json.Marshal(&struct{
+        *Alias
+        {{- range .Properties }}
+        {{- if .CustomJSON }}
+        {{ .Name }} {{ .CustomJSON.Type }} `json:"{{ .JSONName }}{{if not .Required}},omitempty{{end}}"`
+        {{- end }}
+        {{- end }}
+    }{
+        Alias: (*Alias)(m),
+        {{- range .Properties }}
+        {{- if .CustomJSON }}
+        {{ .Name }}: {{ .CustomJSON.Convert }}(m.{{ .Name }}),
+        {{- end }}
+        {{- end }}
+    })
+}
+
+// UnmarshalJSON implements json.Unmarshaler
+func (m *{{ .Name }}) UnmarshalJSON(data []byte) error {
+    type Alias {{ .Name }}
+    aux := &struct{
+        *Alias
+        {{- range .Properties }}
+        {{- if .CustomJSON }}
+        {{ .Name }} {{ .CustomJSON.Type }} `json:"{{ .JSONName }}{{if not .Required}},omitempty{{end}}"`
+        {{- end }}
+        {{- end }}
+    }{
+        Alias: (*Alias)(m),
+    }
+
+    if err := json.Unmarshal(data, &aux); err != nil {
+        return err
+    }
+
+    {{- range .Properties }}
+    {{- if .CustomJSON }}
+    m.{{ .Name }} = {{ .CustomJSON.Parse }}(aux.{{ .Name }})
+    {{- end }}
+    {{- end }}
+
+    return nil
 }
 {{- end }}

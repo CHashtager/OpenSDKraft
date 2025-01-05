@@ -7,6 +7,7 @@ import (
 	"github.com/chashtager/opensdkraft/internal/utils"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/getkin/kin-openapi/openapi3"
 )
@@ -69,61 +70,135 @@ func (tm *TypeMapper) initializeKnownTypes() {
 }
 
 func (g *ModelGenerator) Generate(schemas openapi3.Schemas) error {
-	if schemas == nil {
-		g.logger.Debug("No schemas to generate")
-		return nil
-	}
+	var validationErrors ValidationErrors
 
-	modelsDir := filepath.Join(g.config.OutputDir, "models")
-	g.logger.Debug("Creating models directory: %s", modelsDir)
-	if err := utils.CreateDirectory(modelsDir); err != nil {
-		g.logger.Error("Failed to create models directory: %v", err)
-		return fmt.Errorf("failed to create models directory: %w", err)
-	}
-
-	progress := g.logger.NewProgress(len(schemas), "Generating models")
 	for name, schema := range schemas {
-		g.logger.Debug("Generating model: %s", name)
-		if err := g.generateModel(name, schema, modelsDir); err != nil {
-			g.logger.Error("Failed to generate model %s: %v", name, err)
-			return fmt.Errorf("failed to generate model %s: %w", name, err)
+		if err := g.generateModel(name, schema); err != nil {
+			if valErr, ok := err.(*ValidationError); ok {
+				validationErrors.Errors = append(validationErrors.Errors, *valErr)
+			} else {
+				validationErrors.Add("Model", name, err.Error())
+			}
 		}
-		progress.Increment()
 	}
 
-	g.logger.Info("Successfully generated %d models", len(schemas))
+	if len(validationErrors.Errors) > 0 {
+		return &validationErrors
+	}
+
 	return nil
 }
 
-func (g *ModelGenerator) generateModel(name string, schema *openapi3.SchemaRef, outputDir string) error {
+func (g *ModelGenerator) generateModel(name string, schema *openapi3.SchemaRef) error {
 	modelData, err := g.prepareModelData(name, schema)
 	if err != nil {
-		return err
+		return &ValidationError{
+			Category: "Model",
+			Path:     name,
+			Errors:   []string{err.Error()},
+		}
 	}
 
-	filename := filepath.Join(outputDir, strings.ToLower(name)+".go")
+	// Validate the model data
+	if errs := g.validateModelData(modelData); len(errs) > 0 {
+		return &ValidationError{
+			Category: "Model",
+			Path:     name,
+			Errors:   errs,
+		}
+	}
 
+	// Generate the model file
 	content, err := g.templates.Execute("model", modelData)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to execute template: %w", err)
 	}
 
-	return utils.WriteFile(filename, content)
+	filename := filepath.Join(g.config.OutputDir, "models", strings.ToLower(name)+".go")
+	if err := utils.WriteFile(filename, content); err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+
+	return nil
 }
 
+func (g *ModelGenerator) validateModelData(data *ModelData) []string {
+	var errors []string
+
+	if data.Name == "" {
+		errors = append(errors, "model name is required")
+	}
+
+	if !isValidGoIdentifier(data.Name) {
+		errors = append(errors, fmt.Sprintf("invalid model name: %s", data.Name))
+	}
+
+	for _, prop := range data.Properties {
+		if !isValidGoIdentifier(prop.Name) {
+			errors = append(errors, fmt.Sprintf("invalid property name: %s", prop.Name))
+		}
+
+		if prop.Type == "" {
+			errors = append(errors, fmt.Sprintf("property %s has no type", prop.Name))
+		}
+	}
+
+	return errors
+}
+
+func isValidGoIdentifier(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, c := range name {
+		if i == 0 {
+			if !unicode.IsLetter(c) && c != '_' {
+				return false
+			}
+		} else {
+			if !unicode.IsLetter(c) && !unicode.IsDigit(c) && c != '_' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+//func (g *ModelGenerator) generateModel(name string, schema *openapi3.SchemaRef, outputDir string) error {
+//	modelData, err := g.prepareModelData(name, schema)
+//	if err != nil {
+//		return err
+//	}
+//
+//	filename := filepath.Join(outputDir, strings.ToLower(name)+".go")
+//
+//	content, err := g.templates.Execute("model", modelData)
+//	if err != nil {
+//		return err
+//	}
+//
+//	return utils.WriteFile(filename, content)
+//}
+
 type ModelData struct {
-	Name       string
-	Properties []PropertyData
-	Imports    []string
-	Config     *config.Config
+	Name        string
+	PackageName string
+	Properties  []PropertyData
+	Imports     []string
+	Config      *config.Config
+	Description string
 }
 
 type PropertyData struct {
-	Name     string
-	Type     string
-	JSONName string
-	Required bool
-	Comment  string
+	Name         string
+	Type         string
+	JSONName     string
+	Required     bool
+	Description  string
+	Validate     string
+	Validation   []string
+	ZeroValue    string
+	ExampleValue string
 }
 
 func (g *ModelGenerator) prepareModelData(name string, schema *openapi3.SchemaRef) (*ModelData, error) {
@@ -132,9 +207,11 @@ func (g *ModelGenerator) prepareModelData(name string, schema *openapi3.SchemaRe
 	}
 
 	modelData := &ModelData{
-		Name:    g.typeMapper.ToGoName(name),
-		Config:  g.config,
-		Imports: make([]string, 0),
+		Name:        g.typeMapper.ToGoName(name),
+		PackageName: g.config.PackageName,
+		Config:      g.config,
+		Imports:     make([]string, 0),
+		Description: schema.Value.Description,
 	}
 
 	seenImports := make(map[string]bool)
@@ -165,13 +242,17 @@ func (g *ModelGenerator) preparePropertyData(name string, schema *openapi3.Schem
 
 	goType, imports := g.typeMapper.ToGoType(schema)
 	isRequired := utils.StringContains(required, name)
+	validate := g.generateValidationTag(schema, isRequired)
 
 	return &PropertyData{
-		Name:     g.typeMapper.ToGoName(name),
-		Type:     goType,
-		JSONName: name,
-		Required: isRequired,
-		Comment:  schema.Value.Description,
+		Name:         g.typeMapper.ToGoName(name),
+		Type:         goType,
+		JSONName:     name,
+		Required:     isRequired,
+		Description:  schema.Value.Description,
+		Validate:     validate,
+		ZeroValue:    g.getZeroValue(goType),
+		ExampleValue: g.getExampleValue(schema),
 	}, imports, nil
 }
 
@@ -263,4 +344,67 @@ func (tm *TypeMapper) ToGoName(name string) string {
 	}
 
 	return strings.Join(words, "")
+}
+
+func (g *ModelGenerator) getZeroValue(goType string) string {
+	switch goType {
+	case "string":
+		return `""`
+	case "int", "int32", "int64", "float32", "float64":
+		return "0"
+	case "bool":
+		return "false"
+	default:
+		return "nil"
+	}
+}
+
+func (g *ModelGenerator) getExampleValue(schema *openapi3.SchemaRef) string {
+	if schema.Value.Example != nil {
+		return fmt.Sprintf("%#v", schema.Value.Example)
+	}
+
+	switch schema.Value.Type.Slice()[0] {
+	case "string":
+		return `"example"`
+	case "integer":
+		return "1"
+	case "number":
+		return "1.0"
+	case "boolean":
+		return "true"
+	default:
+		return "nil"
+	}
+}
+
+func (g *ModelGenerator) generateValidationTag(schema *openapi3.SchemaRef, required bool) string {
+	var validations []string
+
+	if required {
+		validations = append(validations, "required")
+	}
+
+	// Add other validations based on schema
+	if schema.Value.MinLength != 0 {
+		validations = append(validations, fmt.Sprintf("min=%d", schema.Value.MinLength))
+	}
+	if schema.Value.MaxLength != nil {
+		validations = append(validations, fmt.Sprintf("max=%d", *schema.Value.MaxLength))
+	}
+	if schema.Value.Pattern != "" {
+		validations = append(validations, fmt.Sprintf("regexp=%s", schema.Value.Pattern))
+	}
+	if schema.Value.Enum != nil {
+		enums := make([]string, len(schema.Value.Enum))
+		for i, v := range schema.Value.Enum {
+			enums[i] = fmt.Sprintf("%v", v)
+		}
+		validations = append(validations, fmt.Sprintf("oneof=%s", strings.Join(enums, " ")))
+	}
+
+	if len(validations) > 0 {
+		return strings.Join(validations, ",")
+	}
+	return ""
 }

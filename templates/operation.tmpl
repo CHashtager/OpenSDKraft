@@ -1,37 +1,90 @@
 package {{ .PackageName }}
 
+import (
+    "context"
+    "fmt"
+    "net/http"
+    "net/url"
+    {{- if .Operation.HasQueryParams }}
+    "strings"
+    {{- end }}
+)
+
 {{- if .Operation.Description }}
 // {{ .Operation.Name }} {{ .Operation.Description }}
 {{- end }}
-func (c *Client) {{ .Operation.Name }}(
-    {{- if .Config.Generator.ClientOptions.UseContext }}ctx context.Context,{{ end }}
+{{- if .Operation.Parameters }}
+
+// {{ .Operation.Name }}Params contains the parameters for {{ .Operation.Name }}
+type {{ .Operation.Name }}Params struct {
     {{- range .Operation.Parameters }}
-    {{ .Name }} {{ .Type }},
+    {{- if .Description }}
+    // {{ .Description }}
+    {{- end }}
+    {{ .Name }} {{ .Type }} `json:"{{ .JSONName }}{{if not .Required}},omitempty{{end}}"{{if .Validate}} validate:"{{ .Validate }}"{{end}}`
+    {{- end }}
+}
+{{- end }}
+
+{{- if .Operation.RequestBody }}
+
+// {{ .Operation.Name }}Request contains the request body for {{ .Operation.Name }}
+type {{ .Operation.Name }}Request struct {
+    {{- if .Operation.RequestBody.Description }}
+    // {{ .Operation.RequestBody.Description }}
+    {{- end }}
+    Body {{ .Operation.RequestBody.Type }}
+}
+{{- end }}
+
+{{- if .Operation.ResponseType }}
+// {{ .Operation.Name }}Response contains the response for {{ .Operation.Name }}
+type {{ .Operation.Name }}Response struct {
+    {{- if .Operation.Description }}
+    // {{ .Operation.Description }}
+    {{- end }}
+    Data {{ .Operation.ResponseType }}
+}
+{{- end }}
+
+// {{ .Operation.Name }} {{ .Operation.Description }}
+func (c *Client) {{ .Operation.Name }}(
+    ctx context.Context,
+    {{- if .Operation.Parameters }}
+    params *{{ .Operation.Name }}Params,
     {{- end }}
     {{- if .Operation.RequestBody }}
-    request {{ .Operation.RequestBody.Type }},
+    request *{{ .Operation.Name }}Request,
     {{- end }}
-) ({{ .Operation.ResponseType }}, error) {
-    {{- if .Config.Generator.ClientOptions.UseContext }}
-    if ctx == nil {
-        ctx = context.Background()
+) ({{ if .Operation.ResponseType }}*{{ .Operation.Name }}Response,{{ end }} error) {
+    {{- if .Operation.Parameters }}
+    if params == nil {
+        return {{ .Operation.ZeroValue }}, fmt.Errorf("params cannot be nil")
     }
     {{- end }}
 
+    // Build path with path parameters
     path := fmt.Sprintf("{{ .Operation.Path }}"
     {{- range .Operation.Parameters }}
-    {{- if eq .Location "path" }}, {{ .Name }}{{ end }}
+    {{- if eq .Location "path" }},
+        {{- if .Required }}
+        params.{{ .Name }}
+        {{- else }}
+        valueOrDefault(params.{{ .Name }}, "")
+        {{- end }}
+    {{- end }}
     {{- end }})
 
     {{- if .Operation.HasQueryParams }}
+    // Add query parameters
     query := url.Values{}
     {{- range .Operation.Parameters }}
     {{- if eq .Location "query" }}
     {{- if .Required }}
-    query.Set("{{ .JSONName }}", fmt.Sprint({{ .Name }}))
+    query.Set("{{ .JSONName }}", fmt.Sprint(params.{{ .Name }}))
     {{- else }}
-    if {{ .Name }} != nil {
-        query.Set("{{ .JSONName }}", fmt.Sprint(*{{ .Name }}))
+    if params.{{ .Name }} != nil {
+        query.Set("{{ .JSONName }}", fmt.Sprint(*params.{{ .Name }}))
     }
     {{- end }}
     {{- end }}
@@ -41,30 +94,61 @@ func (c *Client) {{ .Operation.Name }}(
     }
     {{- end }}
 
-    req, err := c.newRequest(ctx, "{{ .Operation.Method }}", path
-    {{- if .Operation.RequestBody }}, request{{ else }}, nil{{ end }})
+    // Create request
+    req, err := c.newRequest(ctx, "{{ .Operation.Method }}", path,
+        {{- if .Operation.RequestBody }}
+        request.Body
+        {{- else }}
+        nil
+        {{- end }})
     if err != nil {
-        return {{ .Operation.ZeroValue }}, err
+        return {{ .Operation.ZeroValue }}, fmt.Errorf("failed to create request: %w", err)
     }
 
     {{- range .Operation.Parameters }}
     {{- if eq .Location "header" }}
     {{- if .Required }}
-    req.Header.Set("{{ .JSONName }}", fmt.Sprint({{ .Name }}))
+    req.Header.Set("{{ .JSONName }}", fmt.Sprint(params.{{ .Name }}))
     {{- else }}
-    if {{ .Name }} != nil {
-        req.Header.Set("{{ .JSONName }}", fmt.Sprint(*{{ .Name }}))
+    if params.{{ .Name }} != nil {
+        req.Header.Set("{{ .JSONName }}", fmt.Sprint(*params.{{ .Name }}))
     }
     {{- end }}
     {{- end }}
     {{- end }}
 
     {{- if .Operation.ResponseType }}
-    var response {{ .Operation.ResponseType }}
-    err = c.do(req, &response)
-    return response, err
+    // Send request and parse response
+    response := &{{ .Operation.Name }}Response{}
+    if err := c.do(req, &response.Data); err != nil {
+        return nil, err
+    }
+    return response, nil
     {{- else }}
-    err = c.do(req, nil)
-    return err
+    // Send request
+    if err := c.do(req, nil); err != nil {
+        return err
+    }
+    return nil
     {{- end }}
 }
+
+{{- if .Operation.Parameters }}
+func validateParams(params *{{ .Operation.Name }}Params) error {
+    {{- range .Operation.Parameters }}
+    {{- if .Required }}
+    if params.{{ .Name }} == {{ .ZeroValue }} {
+        return fmt.Errorf("{{ .JSONName }} is required")
+    }
+    {{- end }}
+    {{- if .Validation }}
+    {{- range .Validation }}
+    if err := {{ . }}; err != nil {
+        return fmt.Errorf("{{ $.JSONName }}: %w", err)
+    }
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    return nil
+}
+{{- end }}

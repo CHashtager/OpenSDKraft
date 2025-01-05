@@ -1,13 +1,44 @@
 sdkName: MyAPIClient
 outputDir: ./generated
 packageName: myapi
+module: petstore-sdk
 codeStyle:
   usePointers: true
   indentStyle: space
   maxLineLength: 120
   generateComments: true
+  formatting:
+    tabWidth: 2
+    useSpaces: true
+    lineEnding: lf
+
+generator:
+  includeExamples: true
+  includeValidation: true
+  generateInterfaces: true
+  clientOptions:
+    timeout: 30
+    retryEnabled: true
+    maxRetries: 3
+    retryBackoffSeconds: 2
+    useContext: true
+    generateMiddleware: true
+    includeRateLimiting: true
+
 testing:
   generate: true
   framework: testify
-  generateMocks: true
-  includeBenchmarks: true
+  mocks: true
+  benchmark: true
+  coverage:
+    enabled: true
+    threshold: 80.0
+    excludeList:
+      - "*_test.go"
+
+documentation:
+  generate: true
+  format: markdown
+  includeExamples: true
+  outputFormat: single
+  includeChangelog: true

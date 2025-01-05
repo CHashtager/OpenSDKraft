@@ -1,6 +1,7 @@
 package generator
 
 import (
+	"errors"
 	"fmt"
 	"github.com/chashtager/opensdkraft/internal/logging"
 	"github.com/getkin/kin-openapi/openapi3"
@@ -42,7 +43,7 @@ func New(cfg *config.Config) (*Generator, error) {
 	}
 
 	// Initialize template engine
-	tmplEngine, err := NewTemplateEngine(cfg)
+	tmplEngine, err := NewTemplateEngine(cfg, logger)
 	if err != nil {
 		logger.Error("Failed to initialize template engine: %v", err)
 		return nil, fmt.Errorf("failed to initialize template engine: %w", err)
@@ -96,8 +97,7 @@ func (g *Generator) writeAndValidateFile(filename string, content []byte) error 
 func (g *Generator) Generate(inputFile string) error {
 	g.logger.Info("Starting SDK generation from file: %s", inputFile)
 
-	// Load and parse OpenAPI document
-	g.logger.Debug("Parsing OpenAPI document")
+	// Parse OpenAPI document
 	doc, err := g.parser.ParseFile(inputFile)
 	if err != nil {
 		g.logger.Error("Failed to parse OpenAPI document: %v", err)
@@ -105,51 +105,69 @@ func (g *Generator) Generate(inputFile string) error {
 	}
 	g.logger.Info("Successfully parsed OpenAPI document")
 
-	// Validate the document
-	g.logger.Debug("Validating OpenAPI document")
+	// Validate document
 	if err := g.validator.ValidateDocument(doc); err != nil {
-		g.logger.Error("Document validation failed: %v", err)
+		g.logger.Error("OpenAPI document validation failed:\n%v", err)
 		return fmt.Errorf("document validation failed: %w", err)
 	}
 	g.logger.Info("OpenAPI document validation successful")
 
-	// Create output directory structure
-	g.logger.Debug("Creating output directory structure")
+	// Create output structure
 	if err := g.createOutputStructure(); err != nil {
 		g.logger.Error("Failed to create output structure: %v", err)
-		return fmt.Errorf("failed to create output directory structure: %w", err)
+		return err
 	}
 
-	// Set up validation results collection
-	validationErrors := make([]error, 0)
+	var generationErrors ValidationErrors
 
-	// Generate and validate models
-	g.logger.Info("Generating and validating models")
-	if err := g.generateAndValidateModels(doc.Components.Schemas); err != nil {
-		validationErrors = append(validationErrors, err)
+	// Generate models
+	g.logger.Info("Generating models")
+	if err := g.modelGen.Generate(doc.Components.Schemas); err != nil {
+		var e *ValidationErrors
+		switch {
+		case errors.As(err, &e):
+			generationErrors.Errors = append(generationErrors.Errors, e.Errors...)
+		default:
+			generationErrors.Add("Models", "generation", err.Error())
+		}
 	}
 
-	// Generate and validate operations
-	g.logger.Info("Generating and validating operations")
-	if err := g.generateAndValidateOperations(*doc.Paths); err != nil {
-		validationErrors = append(validationErrors, err)
+	// Generate operations
+	g.logger.Info("Generating operations")
+	if err := g.operationGen.Generate(doc.Paths); err != nil {
+		var e *ValidationErrors
+		switch {
+		case errors.As(err, &e):
+			generationErrors.Errors = append(generationErrors.Errors, e.Errors...)
+		default:
+			generationErrors.Add("Operations", "generation", err.Error())
+		}
 	}
 
-	// Generate and validate tests if enabled
+	// Generate tests if enabled
 	if g.config.Testing.Generate {
-		g.logger.Info("Generating and validating tests")
+		g.logger.Info("Generating tests")
 		if err := g.generateAndValidateTests(g.operationGen.GetOperations()); err != nil {
-			validationErrors = append(validationErrors, err)
+			var e *ValidationErrors
+			switch {
+			case errors.As(err, &e):
+				generationErrors.Errors = append(generationErrors.Errors, e.Errors...)
+			default:
+				generationErrors.Add("Tests", "generation", err.Error())
+			}
 		}
 	}
 
-	// Report validation errors
-	if len(validationErrors) > 0 {
-		g.logger.Error("Generation completed with validation errors:")
-		for _, err := range validationErrors {
-			g.logger.Error("- %v", err)
+	// Report any generation errors
+	if len(generationErrors.Errors) > 0 {
+		g.logger.Error("Generation completed with errors:")
+		for _, err := range generationErrors.Errors {
+			g.logger.Error("%s validation errors for %s:", err.Category, err.Path)
+			for _, msg := range err.Errors {
+				g.logger.Error("  - %s", msg)
+			}
 		}
-		return fmt.Errorf("generation completed with %d validation errors", len(validationErrors))
+		return &generationErrors
 	}
 
 	g.logger.Info("SDK generation completed successfully")

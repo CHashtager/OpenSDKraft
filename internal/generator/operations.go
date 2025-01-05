@@ -1,4 +1,3 @@
-// internal/generator/operations.go
 package generator
 
 import (
@@ -32,21 +31,33 @@ type Operation struct {
 	RequestBody    *RequestBody
 	Responses      map[string]Response
 	Authentication bool
+	HasQueryParams bool
+	HasPathParams  bool
+	HasContext     bool
+	ZeroValue      string
+	ExampleValue   string
 }
 
 type Parameter struct {
-	Name        string
-	Type        string
-	Location    string // path, query, header
-	Required    bool
-	Description string
+	Name         string
+	GoName       string
+	Type         string
+	Location     string // path, query, header
+	Required     bool
+	Description  string
+	JSONName     string
+	Validate     string
+	Validation   []string
+	ZeroValue    string
+	ExampleValue string
 }
 
 type RequestBody struct {
-	Type        string
-	Required    bool
-	MediaType   string
-	Description string
+	Type         string
+	Required     bool
+	MediaType    string
+	Description  string
+	ExampleValue string
 }
 
 type Response struct {
@@ -128,7 +139,7 @@ func (g *OperationGenerator) generatePathOperations(path string, pathItem *opena
 		g.operations = append(g.operations, operation)
 
 		// Generate operation file
-		if err := g.generateOperationFile(operation); err != nil {
+		if err := g.generateOperationFile(operation, outputDir); err != nil {
 			return err
 		}
 	}
@@ -145,6 +156,7 @@ func (g *OperationGenerator) parseOperation(method, path string, op *openapi3.Op
 		Parameters:     make([]Parameter, 0),
 		Responses:      make(map[string]Response),
 		Authentication: op.Security != nil,
+		HasContext:     g.config.Generator.ClientOptions.UseContext,
 	}
 
 	// Parse parameters
@@ -157,6 +169,13 @@ func (g *OperationGenerator) parseOperation(method, path string, op *openapi3.Op
 			return nil, err
 		}
 		operation.Parameters = append(operation.Parameters, *parameter)
+		// Set parameter type flags
+		switch paramRef.Value.In {
+		case "query":
+			operation.HasQueryParams = true
+		case "path":
+			operation.HasPathParams = true
+		}
 	}
 
 	// Parse request body
@@ -190,13 +209,19 @@ func (g *OperationGenerator) parseParameter(paramRef *openapi3.ParameterRef) (*P
 
 	param := paramRef.Value
 	goType, _ := g.typeMapper.ToGoType(param.Schema)
+	validate := g.generateParamValidation(param)
 
 	return &Parameter{
-		Name:        param.Name,
-		Type:        goType,
-		Location:    param.In,
-		Required:    param.Required,
-		Description: param.Description,
+		Name:         param.Name,
+		GoName:       g.typeMapper.ToGoName(param.Name),
+		Type:         goType,
+		Location:     param.In,
+		Required:     param.Required,
+		Description:  param.Description,
+		JSONName:     param.Name,
+		Validate:     validate,
+		ZeroValue:    g.getZeroValue(goType),
+		ExampleValue: g.getExampleValue(param.Schema),
 	}, nil
 }
 
@@ -220,39 +245,140 @@ func (g *OperationGenerator) parseRequestBody(bodyRef *openapi3.RequestBodyRef) 
 	}
 
 	goType, _ := g.typeMapper.ToGoType(schema)
+	exampleValue := g.generateExampleValue(schema)
 
 	return &RequestBody{
-		Type:        goType,
-		Required:    body.Required,
-		MediaType:   mediaType,
-		Description: body.Description,
+		Type:         goType,
+		Required:     body.Required,
+		MediaType:    mediaType,
+		Description:  body.Description,
+		ExampleValue: exampleValue,
 	}, nil
 }
 
+func (g *OperationGenerator) generateExampleValue(schema *openapi3.SchemaRef) string {
+	if schema == nil || schema.Value == nil {
+		return "nil"
+	}
+
+	// If schema has an example, use it
+	if schema.Value.Example != nil {
+		return fmt.Sprintf("%#v", schema.Value.Example)
+	}
+
+	// Generate example based on schema type
+	schemaType := ""
+	if len(schema.Value.Type.Slice()) > 0 {
+		schemaType = schema.Value.Type.Slice()[0]
+	}
+
+	switch schemaType {
+	case "array":
+		if schema.Value.Items != nil {
+			itemExample := g.generateExampleValue(schema.Value.Items)
+			itemType, _ := g.typeMapper.ToGoType(schema.Value.Items)
+			return fmt.Sprintf("[]%s{%s}", itemType, itemExample)
+		}
+		return "[]interface{}{}"
+
+	case "object":
+		if ref := schema.Ref; ref != "" {
+			// Reference to another schema
+			parts := strings.Split(ref, "/")
+			typeName := parts[len(parts)-1]
+			return fmt.Sprintf("&%s{}", g.typeMapper.ToGoName(typeName))
+		}
+		return "map[string]interface{}{}"
+
+	case "string":
+		if schema.Value.Enum != nil && len(schema.Value.Enum) > 0 {
+			return fmt.Sprintf("%#v", schema.Value.Enum[0])
+		}
+		return `"example"`
+
+	case "integer":
+		if schema.Value.Format == "int64" {
+			return "int64(123)"
+		}
+		return "42"
+
+	case "number":
+		if schema.Value.Format == "float" {
+			return "float32(1.23)"
+		}
+		return "1.23"
+
+	case "boolean":
+		return "true"
+
+	default:
+		return "nil"
+	}
+}
+
+// Helper function to generate example values for request/response
+func (g *OperationGenerator) generateExampleResponse(responses map[string]*openapi3.ResponseRef) string {
+	// Look for 200 or 201 response first
+	for _, statusCode := range []string{"200", "201"} {
+		if resp, ok := responses[statusCode]; ok {
+			for _, content := range resp.Value.Content {
+				if content.Schema != nil {
+					return g.generateExampleValue(content.Schema)
+				}
+			}
+		}
+	}
+
+	// If no successful response found, try any response
+	for _, resp := range responses {
+		if resp.Value == nil {
+			continue
+		}
+		for _, content := range resp.Value.Content {
+			if content.Schema != nil {
+				return g.generateExampleValue(content.Schema)
+			}
+		}
+	}
+
+	return "nil"
+}
 func (g *OperationGenerator) parseResponse(status string, responseRef *openapi3.ResponseRef) (*Response, error) {
 	if responseRef.Value == nil {
-		return nil, errors.InvalidInput("response value is nil")
+		return &Response{
+			StatusCode:  status,
+			Type:        "error",
+			MediaType:   "application/json",
+			Description: "Error response",
+		}, nil
 	}
 
 	resp := responseRef.Value
-	// Get the first content type and its schema
-	var mediaType string
-	var schema *openapi3.SchemaRef
-	for mt, content := range resp.Content {
-		mediaType = mt
-		schema = content.Schema
-		break
+
+	// Default response type if no content is specified
+	responseType := "void"
+	mediaType := "application/json"
+
+	if resp.Content != nil && len(resp.Content) > 0 {
+		// Find the first available content type (prefer JSON)
+		for mt, content := range resp.Content {
+			if content.Schema != nil {
+				goType, _ := g.typeMapper.ToGoType(content.Schema)
+				return &Response{
+					StatusCode:  status,
+					Type:        goType,
+					MediaType:   mt,
+					Description: *resp.Description,
+				}, nil
+			}
+			mediaType = mt
+		}
 	}
 
-	if schema == nil {
-		return nil, errors.InvalidInput("response schema is nil")
-	}
-
-	goType, _ := g.typeMapper.ToGoType(schema)
-
+	// Return a default response if no schema is found
 	return &Response{
 		StatusCode:  status,
-		Type:        goType,
+		Type:        responseType,
 		MediaType:   mediaType,
 		Description: *resp.Description,
 	}, nil
@@ -278,7 +404,7 @@ func (g *OperationGenerator) generateAPIClient(operations []*Operation) error {
 	return utils.WriteFile(filename, content)
 }
 
-func (g *OperationGenerator) generateOperationFile(operation *Operation) error {
+func (g *OperationGenerator) generateOperationFile(operation *Operation, outputDir string) error {
 	data := struct {
 		Operation   *Operation
 		PackageName string
@@ -294,7 +420,7 @@ func (g *OperationGenerator) generateOperationFile(operation *Operation) error {
 		return err
 	}
 
-	filename := filepath.Join(g.config.OutputDir, "operations", strings.ToLower(operation.Name)+".go")
+	filename := filepath.Join(outputDir, "operations", strings.ToLower(operation.Name)+".go")
 	return utils.WriteFile(filename, content)
 }
 
@@ -353,4 +479,72 @@ func (g *OperationGenerator) generateClientFile() error {
 // GetOperations returns the list of generated operations
 func (g *OperationGenerator) GetOperations() []*Operation {
 	return g.operations
+}
+
+func (g *OperationGenerator) generateParamValidation(param *openapi3.Parameter) string {
+	var validations []string
+
+	if param.Required {
+		validations = append(validations, "required")
+	}
+
+	if param.Schema != nil && param.Schema.Value != nil {
+		schema := param.Schema.Value
+
+		// Add schema-based validations
+		if schema.MinLength != 0 {
+			validations = append(validations, fmt.Sprintf("min=%d", schema.MinLength))
+		}
+		if schema.MaxLength != nil {
+			validations = append(validations, fmt.Sprintf("max=%d", *schema.MaxLength))
+		}
+		if schema.Pattern != "" {
+			validations = append(validations, fmt.Sprintf("regexp=%s", schema.Pattern))
+		}
+		if schema.Enum != nil {
+			enums := make([]string, len(schema.Enum))
+			for i, v := range schema.Enum {
+				enums[i] = fmt.Sprintf("%v", v)
+			}
+			validations = append(validations, fmt.Sprintf("oneof=%s", strings.Join(enums, " ")))
+		}
+	}
+
+	if len(validations) > 0 {
+		return strings.Join(validations, ",")
+	}
+	return ""
+}
+
+func (g *OperationGenerator) getZeroValue(goType string) string {
+	switch goType {
+	case "string":
+		return `""`
+	case "int", "int32", "int64", "float32", "float64":
+		return "0"
+	case "bool":
+		return "false"
+	default:
+		return "nil"
+	}
+}
+
+func (g *OperationGenerator) getExampleValue(schema *openapi3.SchemaRef) string {
+	if schema != nil && schema.Value != nil {
+		if schema.Value.Example != nil {
+			return fmt.Sprintf("%#v", schema.Value.Example)
+		}
+
+		switch schema.Value.Type.Slice()[0] {
+		case "string":
+			return `"example"`
+		case "integer":
+			return "1"
+		case "number":
+			return "1.0"
+		case "boolean":
+			return "true"
+		}
+	}
+	return "nil"
 }

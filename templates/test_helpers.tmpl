@@ -1,0 +1,55 @@
+package {{ .PackageName }}_test
+
+import (
+    "encoding/json"
+    "net/http"
+    "net/http/httptest"
+    "testing"
+
+    "github.com/stretchr/testify/require"
+)
+
+// mockServer creates a test server with the given handler
+func mockServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
+    return httptest.NewServer(handler)
+}
+
+// jsonResponse creates a JSON response handler
+func jsonResponse(t *testing.T, status int, body interface{}) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(status)
+        if body != nil {
+            err := json.NewEncoder(w).Encode(body)
+            require.NoError(t, err)
+        }
+    }
+}
+
+// errorResponse creates an error response handler
+func errorResponse(t *testing.T, status int, message string) http.HandlerFunc {
+    return jsonResponse(t, status, map[string]interface{}{
+        "code":    status,
+        "message": message,
+    })
+}
+
+// requireJSON asserts that the request body matches the expected JSON
+func requireJSON(t *testing.T, r *http.Request, expected interface{}) {
+    var actual interface{}
+    err := json.NewDecoder(r.Body).Decode(&actual)
+    require.NoError(t, err)
+    require.Equal(t, expected, actual)
+}
+
+// requireQueryParam asserts that a query parameter has the expected value
+func requireQueryParam(t *testing.T, r *http.Request, param, expected string) {
+    actual := r.URL.Query().Get(param)
+    require.Equal(t, expected, actual)
+}
+
+// requireHeader asserts that a header has the expected value
+func requireHeader(t *testing.T, r *http.Request, header, expected string) {
+    actual := r.Header.Get(header)
+    require.Equal(t, expected, actual)
+}

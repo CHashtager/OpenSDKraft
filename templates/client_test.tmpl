@@ -1,0 +1,158 @@
+package {{ .PackageName }}_test
+
+import (
+    "context"
+    "net/http"
+    "net/http/httptest"
+    "testing"
+    "time"
+
+    "github.com/stretchr/testify/assert"
+    "github.com/stretchr/testify/require"
+
+    {{ .PackageName }} "{{ .Config.Module }}"
+)
+
+func TestNewClient(t *testing.T) {
+    tests := []struct {
+        name        string
+        baseURL     string
+        opts        []{{ .PackageName }}.ClientOption
+        wantErr     bool
+        checkClient func(*testing.T, *{{ .PackageName }}.Client)
+    }{
+        {
+            name:    "valid client creation",
+            baseURL: "https://api.example.com",
+            opts:    nil,
+            checkClient: func(t *testing.T, c *{{ .PackageName }}.Client) {
+                require.NotNil(t, c)
+                {{- if .Config.Generator.ClientOptions.UseAuth }}
+                assert.Empty(t, c.GetAPIKey())
+                {{- end }}
+            },
+        },
+        {
+            name:    "with custom HTTP client",
+            baseURL: "https://api.example.com",
+            opts: []{{ .PackageName }}.ClientOption{
+                {{ .PackageName }}.WithHTTPClient(&http.Client{
+                    Timeout: 5 * time.Second,
+                }),
+            },
+            checkClient: func(t *testing.T, c *{{ .PackageName }}.Client) {
+                require.NotNil(t, c)
+            },
+        },
+        {{- if .Config.Generator.ClientOptions.UseAuth }}
+        {
+            name:    "with API key",
+            baseURL: "https://api.example.com",
+            opts: []{{ .PackageName }}.ClientOption{
+                {{ .PackageName }}.WithAPIKey("test-key"),
+            },
+            checkClient: func(t *testing.T, c *{{ .PackageName }}.Client) {
+                require.NotNil(t, c)
+                assert.Equal(t, "test-key", c.GetAPIKey())
+            },
+        },
+        {{- end }}
+        {{- if .Config.Generator.ClientOptions.RetryEnabled }}
+        {
+            name:    "with retry config",
+            baseURL: "https://api.example.com",
+            opts: []{{ .PackageName }}.ClientOption{
+                {{ .PackageName }}.WithRetryConfig(&{{ .PackageName }}.RetryConfig{
+                    MaxRetries:    3,
+                    RetryDelay:    time.Second,
+                    MaxRetryDelay: time.Second * 5,
+                    BackoffFactor: 2.0,
+                }),
+            },
+            checkClient: func(t *testing.T, c *{{ .PackageName }}.Client) {
+                require.NotNil(t, c)
+            },
+        },
+        {{- end }}
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            client := {{ .PackageName }}.NewClient(tt.baseURL, tt.opts...)
+            if tt.checkClient != nil {
+                tt.checkClient(t, client)
+            }
+        })
+    }
+}
+
+func TestClient_do(t *testing.T) {
+    tests := []struct {
+        name       string
+        setup      func(*httptest.Server) *{{ .PackageName }}.Client
+        wantErr    bool
+        errMessage string
+    }{
+        {
+            name: "successful request",
+            setup: func(s *httptest.Server) *{{ .PackageName }}.Client {
+                return {{ .PackageName }}.NewClient(s.URL)
+            },
+        },
+        {
+            name: "server error",
+            setup: func(s *httptest.Server) *{{ .PackageName }}.Client {
+                s.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+                    w.WriteHeader(http.StatusInternalServerError)
+                    w.Write([]byte(`{"code":"SERVER_ERROR","message":"internal server error"}`))
+                })
+                return {{ .PackageName }}.NewClient(s.URL)
+            },
+            wantErr:    true,
+            errMessage: "internal server error",
+        },
+        {{- if .Config.Generator.ClientOptions.RetryEnabled }}
+        {
+            name: "retry on server error",
+            setup: func(s *httptest.Server) *{{ .PackageName }}.Client {
+                attempts := 0
+                s.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+                    attempts++
+                    if attempts < 3 {
+                        w.WriteHeader(http.StatusServiceUnavailable)
+                        return
+                    }
+                    w.WriteHeader(http.StatusOK)
+                })
+                return {{ .PackageName }}.NewClient(s.URL, {{ .PackageName }}.WithRetryConfig(&{{ .PackageName }}.RetryConfig{
+                    MaxRetries: 3,
+                    RetryDelay: time.Millisecond,
+                }))
+            },
+        },
+        {{- end }}
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+                w.WriteHeader(http.StatusOK)
+            }))
+            defer server.Close()
+
+            client := tt.setup(server)
+            req, err := http.NewRequestWithContext(context.Background(), "GET", server.URL, nil)
+            require.NoError(t, err)
+
+            err = client.Do(req, nil)
+            if tt.wantErr {
+                require.Error(t, err)
+                if tt.errMessage != "" {
+                    assert.Contains(t, err.Error(), tt.errMessage)
+                }
+            } else {
+                require.NoError(t, err)
+            }
+        })
+    }
+}

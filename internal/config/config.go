@@ -2,18 +2,23 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"github.com/spf13/viper"
+	"os"
+	"path/filepath"
 )
 
 type Config struct {
 	SDKName       string               `yaml:"sdkName"`
 	OutputDir     string               `yaml:"outputDir"`
 	PackageName   string               `yaml:"packageName"`
+	Module        string               `yaml:"module"`
 	CodeStyle     CodeStyle            `yaml:"codeStyle"`
 	Generator     GeneratorOptions     `yaml:"generator"`
 	Testing       Testing              `yaml:"testing"`
 	Documentation DocumentationOptions `yaml:"documentation"`
 }
+
 type CodeStyle struct {
 	UsePointers   bool              `yaml:"usePointers"`
 	IndentStyle   string            `yaml:"indentStyle"`
@@ -21,6 +26,7 @@ type CodeStyle struct {
 	Comments      bool              `yaml:"generateComments"`
 	Formatting    FormattingOptions `yaml:"formatting"`
 }
+
 type Testing struct {
 	Generate  bool            `yaml:"generate"`
 	Framework string          `yaml:"framework"` // e.g., "testify", "standard"
@@ -44,12 +50,14 @@ type ClientOptions struct {
 	UseContext          bool `yaml:"useContext"`
 	GenerateMiddleware  bool `yaml:"generateMiddleware"`
 	IncludeRateLimiting bool `yaml:"includeRateLimiting"`
+	UseAuth             bool `yaml:"useAuth"`
 }
 
 type GeneratorOptions struct {
 	IncludeExamples    bool          `yaml:"includeExamples"`
 	IncludeValidation  bool          `yaml:"includeValidation"`
 	GenerateInterfaces bool          `yaml:"generateInterfaces"`
+	IncludeJSON        bool          `yaml:"includeJSON"`
 	Verbose            bool          `yaml:"verbose"`
 	ClientOptions      ClientOptions `yaml:"clientOptions"`
 }
@@ -110,4 +118,87 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 
 	return &config, nil
+}
+
+func (c *Config) Validate() error {
+	if err := c.validatePaths(); err != nil {
+		return err
+	}
+
+	if err := c.validateGenerator(); err != nil {
+		return err
+	}
+
+	if err := c.validateTesting(); err != nil {
+		return err
+	}
+
+	return c.validateCodeStyle()
+}
+
+func (c *Config) validatePaths() error {
+	if c.OutputDir == "" {
+		c.OutputDir = "./generated"
+	}
+
+	// Expand environment variables
+	c.OutputDir = os.ExpandEnv(c.OutputDir)
+
+	return nil
+}
+
+func (c *Config) validateGenerator() error {
+	if c.Generator.ClientOptions.Timeout < 0 {
+		return fmt.Errorf("timeout cannot be negative")
+	}
+
+	if c.Generator.ClientOptions.MaxRetries < 0 {
+		return fmt.Errorf("max retries cannot be negative")
+	}
+
+	return nil
+}
+
+func (c *Config) validateTesting() error {
+	if c.Testing.Generate {
+		if c.Testing.Framework == "" {
+			c.Testing.Framework = "testify"
+		}
+
+		if c.Testing.Coverage.Threshold < 0 || c.Testing.Coverage.Threshold > 100 {
+			return fmt.Errorf("coverage threshold must be between 0 and 100")
+		}
+	}
+
+	return nil
+}
+
+func (c *Config) validateCodeStyle() error {
+	if c.CodeStyle.MaxLineLength < 0 {
+		return fmt.Errorf("max line length cannot be negative")
+	}
+
+	if c.CodeStyle.IndentStyle != "tab" && c.CodeStyle.IndentStyle != "space" {
+		return fmt.Errorf("indent style must be either 'tab' or 'space'")
+	}
+
+	return nil
+}
+
+func (c *Config) ApplyDefaults() {
+	if c.SDKName == "" {
+		c.SDKName = filepath.Base(c.OutputDir)
+	}
+
+	if c.PackageName == "" {
+		c.PackageName = "sdk"
+	}
+
+	if c.Generator.ClientOptions.Timeout == 0 {
+		c.Generator.ClientOptions.Timeout = 30
+	}
+
+	if c.CodeStyle.MaxLineLength == 0 {
+		c.CodeStyle.MaxLineLength = 120
+	}
 }
